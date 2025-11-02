@@ -1,0 +1,107 @@
+name: Calculate Student Score
+
+on:
+  schedule:
+    # 每天UTC时间0点运行
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 允许手动触发
+
+jobs:
+  calculate-score:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Calculate score based on GitHub metrics
+        id: calculate
+        run: |
+          # 获取仓库信息
+          REPO_NAME=${{ github.repository }}
+          OWNER=$(echo $REPO_NAME | cut -d'/' -f1)
+          REPO=$(echo $REPO_NAME | cut -d'/' -f2)
+          
+          echo "Repository: $OWNER/$REPO"
+          
+          # 使用GitHub API获取数据
+          # 获取star数量
+          STARS_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$OWNER/$REPO")
+          STARS=$(echo $STARS_RESPONSE | jq -r '.stargazers_count // 0')
+          echo "Stars response: $STARS_RESPONSE"
+          
+          # 获取所有issues（不包括PR）
+          ALL_ISSUES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues?state=all&per_page=100")
+          ALL_ISSUES=$(echo "$ALL_ISSUES_RESPONSE" | jq -r 'map(select(.pull_request == null)) | length')
+          
+          # 获取open issues（不包括PR）
+          OPEN_ISSUES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues?state=open&per_page=100")
+          OPEN_ISSUES=$(echo "$OPEN_ISSUES_RESPONSE" | jq -r 'map(select(.pull_request == null)) | length')
+          
+          # 计算closed issues
+          CLOSED_ISSUES=$((ALL_ISSUES - OPEN_ISSUES))
+          
+          # 获取PR数量
+          PRS_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$OWNER/$REPO/pulls?state=all&per_page=100")
+          PR_COUNT=$(echo "$PRS_RESPONSE" | jq -r 'length')
+          
+          # 权重定义
+          STAR_WEIGHT=10
+          ISSUE_WEIGHT=20
+          PR_WEIGHT=30
+          
+          # 计算分数
+          SCORE=$((STARS * STAR_WEIGHT + CLOSED_ISSUES * ISSUE_WEIGHT + PR_COUNT * PR_WEIGHT))
+          
+          # 输出结果
+          echo "Stars: $STARS"
+          echo "All Issues: $ALL_ISSUES"
+          echo "Open Issues: $OPEN_ISSUES"
+          echo "Closed Issues: $CLOSED_ISSUES"
+          echo "Pull Requests: $PR_COUNT"
+          echo "Total Score: $SCORE"
+          
+          # 保存为环境变量供后续步骤使用
+          echo "stars=$STARS" >> $GITHUB_ENV
+          echo "issues=$CLOSED_ISSUES" >> $GITHUB_ENV
+          echo "prs=$PR_COUNT" >> $GITHUB_ENV
+          echo "score=$SCORE" >> $GITHUB_ENV
+
+      - name: Create or update score report
+        run: |
+          # 创建分数报告文件
+          cat > score-report.md << EOF
+          # 学员成绩报告
+          
+          | 指标 | 数量 | 权重 | 分数 |
+          |------|------|------|------|
+          | Stars | \${{ env.stars }} | 10 | \$((\${{ env.stars }} * 10)) |
+          | 已解决的Issues | \${{ env.issues }} | 20 | \$((\${{ env.issues }} * 20)) |
+          | Pull Requests | \${{ env.prs }} | 30 | \$((\${{ env.prs }} * 30)) |
+          | **总分** | | | **\${{ env.score }}** |
+          
+          ## 评分说明
+          
+          - Stars: 每个star计10分
+          - 已解决的Issues: 每个已解决的issue计20分
+          - Pull Requests: 每个PR计30分
+          
+          更新时间: $(date)
+          EOF
+
+      - name: Commit and push score report
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add score-report.md || echo "No score report to add"
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update score report"
+          git push origin HEAD:${{ github.ref }} || echo "No changes to push"
